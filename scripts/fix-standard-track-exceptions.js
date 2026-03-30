@@ -98,10 +98,108 @@ const recordSpecUrl = (featurePath, specUrl) => {
   }
 };
 
+/**
+ * Cached map from spec base URL to respec shortname, loaded on first `x` use.
+ * @type {Map<string, string> | null}
+ */
+let xrefSpecMap = null;
+
+/**
+ * Lazy-load the spec shortname map from the respec xref meta endpoint.
+ * @returns {Promise<Map<string, string>>}
+ */
+const loadXrefSpecMap = async () => {
+  if (xrefSpecMap) {
+    return xrefSpecMap;
+  }
+  xrefSpecMap = new Map();
+  try {
+    const res = await fetch('https://respec.org/xref/meta?fields=specs');
+    if (res.ok) {
+      const data =
+        /** @type {{ specs: { current: Record<string, { url: string }> } }} */ (
+          await res.json()
+        );
+      for (const [shortname, info] of Object.entries(
+        data.specs?.current ?? {},
+      )) {
+        if (info.url) {
+          xrefSpecMap.set(info.url.replace(/\/?$/, '/'), shortname);
+        }
+      }
+    }
+  } catch {
+    // non-fatal: xref queries will just lack spec filtering
+  }
+  return xrefSpecMap;
+};
+
+/**
+ * Derive a respec spec shortname from a spec_url using the xref meta map.
+ * @param {string | string[]} specUrl Spec URL from an ancestor feature
+ * @param {Map<string, string>} specMap Shortname map from loadXrefSpecMap
+ * @returns {string | undefined}
+ */
+const guessSpecShortname = (specUrl, specMap) => {
+  const url = [specUrl].flat()[0];
+  let candidate = url.split('#')[0].replace(/\/?$/, '/');
+  while (candidate.length > 'https://x/'.length) {
+    const hit = specMap.get(candidate);
+    if (hit) {
+      return hit;
+    }
+    candidate = candidate.replace(/[^/]+\/?$/, '');
+  }
+  return undefined;
+};
+
+/**
+ * Fetch spec URL suggestions from the respec xref API.
+ * @param {string} featurePath Dot-separated feature path
+ * @param {string | string[] | undefined} ancestorSpecUrl Ancestor spec_url for spec filtering
+ * @returns {Promise<string[]>}
+ */
+const fetchXrefSuggestions = async (featurePath, ancestorSpecUrl) => {
+  const parts = featurePath.split('.');
+  const term = parts[parts.length - 1];
+  /** @type {{ term: string; for?: string; specs?: string[] }} */
+  const xrefQuery = { term };
+  if (parts[0] === 'api' && parts.length >= 3) {
+    xrefQuery.for = parts[parts.length - 2];
+  }
+  if (ancestorSpecUrl) {
+    const specMap = await loadXrefSpecMap();
+    const shortname = guessSpecShortname(ancestorSpecUrl, specMap);
+    if (shortname) {
+      xrefQuery.specs = [shortname];
+    }
+  }
+  try {
+    const res = await fetch('https://respec.org/xref/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queries: [xrefQuery] }),
+    });
+    if (!res.ok) {
+      return [];
+    }
+    const data = /** @type {{ result: { uri: string }[][] }} */ (
+      await res.json()
+    );
+    return (data.result?.[0] ?? [])
+      .map((m) => m.uri)
+      .filter(Boolean)
+      .slice(0, 5);
+  } catch {
+    return [];
+  }
+};
+
 const instructions = `
   ${styleText('bold', 'Actions:')}
     ${styleText('cyan', 'https://...')}  Add the URL as spec_url (comma-separated for multiple)
     ${styleText('cyan', '1-9')}          Accept a numbered suggestion
+    ${styleText('cyan', 'x')}            Fetch suggestions from respec xref
     ${styleText('cyan', 'p')}            Use parent feature's spec_url
     ${styleText('cyan', 'p=https://...')} Set spec_url on parent + this subfeature
     ${styleText('cyan', 'f')}            Set standard_track to false (+ all subfeatures)
@@ -153,7 +251,7 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
-const prompt = `  ${styleText('dim', 'URL, 1-9 (suggestion), p, f, /skip-to, or ?')}
+const prompt = `  ${styleText('dim', 'URL, 1-9 (suggestion), x (xref), p, f, /skip-to, or ?')}
   > `;
 
 /** Save progress and exit */
@@ -278,7 +376,7 @@ while (idx < exceptions.length) {
 
   // Print suggestions from other BCD features with the same segment name
   const lastSegment = featurePath.split('.').pop() ?? featurePath;
-  const suggestions = (specUrlBySegment.get(lastSegment) ?? []).slice(0, 5);
+  let suggestions = (specUrlBySegment.get(lastSegment) ?? []).slice(0, 5);
   if (suggestions.length > 0) {
     console.log(styleText('dim', '  suggestions:'));
     for (let s = 0; s < suggestions.length; s++) {
@@ -302,6 +400,28 @@ while (idx < exceptions.length) {
         openUrls(ancestor.spec_url);
       } else {
         console.log(styleText('red', '  No ancestor with spec_url to open.'));
+      }
+      continue;
+    }
+
+    if (answer === 'x') {
+      console.log(styleText('dim', '  Fetching xref suggestions…'));
+      const xrefUrls = await fetchXrefSuggestions(
+        featurePath,
+        ancestor?.spec_url,
+      );
+      const newUrls = xrefUrls.filter((u) => !suggestions.includes(u));
+      if (newUrls.length === 0) {
+        console.log(styleText('yellow', '  No new xref suggestions found.'));
+      } else {
+        const offset = suggestions.length;
+        suggestions = [...suggestions, ...newUrls];
+        console.log(styleText('dim', '  xref suggestions:'));
+        for (let s = 0; s < newUrls.length; s++) {
+          console.log(
+            `    ${styleText('dim', `[${offset + s + 1}]`)} ${styleText('underline', newUrls[s])}`,
+          );
+        }
       }
       continue;
     }
