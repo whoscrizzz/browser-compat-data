@@ -99,13 +99,13 @@ const recordSpecUrl = (featurePath, specUrl) => {
 };
 
 /**
- * Cached map from spec base URL to respec shortname, loaded on first `x` use.
+ * Cached map from respec shortname to spec base URL, loaded on first `x` use.
  * @type {Map<string, string> | null}
  */
 let xrefSpecMap = null;
 
 /**
- * Lazy-load the spec shortname map from the respec xref meta endpoint.
+ * Lazy-load the shortname → base URL map from the respec xref meta endpoint.
  * @returns {Promise<Map<string, string>>}
  */
 const loadXrefSpecMap = async () => {
@@ -124,7 +124,7 @@ const loadXrefSpecMap = async () => {
         data.specs?.current ?? {},
       )) {
         if (info.url) {
-          xrefSpecMap.set(info.url.replace(/\/?$/, '/'), shortname);
+          xrefSpecMap.set(shortname, info.url.replace(/\/?$/, ''));
         }
       }
     }
@@ -141,14 +141,11 @@ const loadXrefSpecMap = async () => {
  * @returns {string | undefined}
  */
 const guessSpecShortname = (specUrl, specMap) => {
-  const url = [specUrl].flat()[0];
-  let candidate = url.split('#')[0].replace(/\/?$/, '/');
-  while (candidate.length > 'https://x/'.length) {
-    const hit = specMap.get(candidate);
-    if (hit) {
-      return hit;
+  const url = [specUrl].flat()[0].split('#')[0];
+  for (const [shortname, base] of specMap) {
+    if (url.startsWith(base)) {
+      return shortname;
     }
-    candidate = candidate.replace(/[^/]+\/?$/, '');
   }
   return undefined;
 };
@@ -189,12 +186,17 @@ const fetchXrefSuggestions = async (
     if (!res.ok) {
       return [];
     }
-    const data = /** @type {{ result: { uri: string }[][] }} */ (
-      await res.json()
-    );
-    return (data.result?.[0] ?? [])
-      .map((m) => m.uri)
-      .filter(Boolean)
+    // result[0] is [cacheHash, matchesArray]
+    const data =
+      /** @type {{ result: [string, { shortname: string; uri: string }[]][] }} */ (
+        await res.json()
+      );
+    const specMap = await loadXrefSpecMap();
+    return (data.result?.[0]?.[1] ?? [])
+      .flatMap((m) => {
+        const base = specMap.get(m.shortname);
+        return base ? [`${base}${m.uri}`] : [];
+      })
       .slice(0, 5);
   } catch {
     return [];
