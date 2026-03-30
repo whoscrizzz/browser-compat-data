@@ -41,7 +41,7 @@ import { updateFeatures } from './bulk-editor/utils.js';
  * Index of spec URLs used by other BCD features with the same last path segment.
  * Built at startup by traversing the full BCD dataset, and updated during the
  * session as the user assigns new spec URLs.
- * @type {Map<string, string[]>}
+ * @type {Map<string, { url: string; count: number }[]>}
  */
 const specUrlBySegment = (() => {
   /** @type {Map<string, Map<string, number>>} */
@@ -72,12 +72,14 @@ const specUrlBySegment = (() => {
   for (const topLevel of Object.values(bcd)) {
     traverse(/** @type {Identifier} */ (topLevel));
   }
-  /** @type {Map<string, string[]>} */
+  /** @type {Map<string, { url: string; count: number }[]>} */
   const result = new Map();
   for (const [seg, urlCounts] of counts) {
     result.set(
       seg,
-      [...urlCounts.entries()].sort((a, b) => b[1] - a[1]).map(([u]) => u),
+      [...urlCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([url, count]) => ({ url, count })),
     );
   }
   return result;
@@ -92,7 +94,9 @@ const recordSpecUrl = (featurePath, specUrl) => {
   const segment = featurePath.split('.').pop() ?? featurePath;
   const newUrls = [specUrl].flat();
   const existing = specUrlBySegment.get(segment) ?? [];
-  const toAdd = newUrls.filter((u) => !existing.includes(u));
+  const toAdd = newUrls
+    .filter((u) => !existing.some((e) => e.url === u))
+    .map((url) => ({ url, count: 1 }));
   if (toAdd.length > 0) {
     specUrlBySegment.set(segment, [...toAdd, ...existing]);
   }
@@ -395,12 +399,16 @@ while (idx < exceptions.length) {
 
   // Print suggestions from other BCD features with the same segment name
   const lastSegment = featurePath.split('.').pop() ?? featurePath;
-  let suggestions = (specUrlBySegment.get(lastSegment) ?? []).slice(0, 5);
+  const bcdSuggestions = (specUrlBySegment.get(lastSegment) ?? []).slice(0, 5);
+  const suggestionCounts = new Map(bcdSuggestions.map((e) => [e.url, e.count]));
+  let suggestions = bcdSuggestions.map((e) => e.url);
   if (suggestions.length > 0) {
     console.log(styleText('dim', '  suggestions:'));
     for (let s = 0; s < suggestions.length; s++) {
+      const count = suggestionCounts.get(suggestions[s]) ?? 0;
+      const countStr = count > 1 ? ` ${styleText('dim', `×${count}`)}` : '';
       console.log(
-        `    ${styleText('dim', `[${s + 1}]`)} ${styleText('underline', suggestions[s])}`,
+        `    ${styleText('dim', `[${s + 1}]`)} ${styleText('underline', suggestions[s])}${countStr}`,
       );
     }
   }
